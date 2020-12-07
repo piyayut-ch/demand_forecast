@@ -3,7 +3,7 @@
 ```{r}
 if (!require("xfun")) install.packages("xfun")
 pkgs <- c(
-  'forecast', 'vars', 'urca', 'MLmetrics', 
+  'forecast', 'vars', 'urca', 'MLmetrics', "yardstick",
   'lubridate', 'tsbox', 'timetk', 'rlist',
   'extrafont', 'patchwork', 'hrbrthemes', 'ggthemes', 'ggsci', 'scales', 
   'tidyverse', 'vroom', 'readxl', 'writexl', 'tsibble'
@@ -59,7 +59,7 @@ p_h100_th <- data_ts[, 'p_h100_th'] %>% log()
 gdppc <- data_ts[, 'gdppc'] %>% log()
 pop <- data_ts[, 'pop'] %>% log()
 
-ls_vars = list(
+vars_ls = list(
   ex_hommali = ex_hommali, 
   ex_white = ex_white, 
   p_w5_th = p_w5_th, 
@@ -178,15 +178,15 @@ adf_table <- function(ur_adf) {
 ```
 
 ```{r}
-varnames = rep(names(ls_vars), 1)
+vars_nam = rep(names(vars_ls), 1)
 
-params = expand_grid(varnames, c(0,1)) %>%
-  set_names(c('names', 'ndiff')) %>%
-  mutate(ser = ls_vars[names])
+params = expand_grid(vars_nam, c(0,1)) %>%
+  set_names(c('name', 'ndiff')) %>%
+  mutate(ser = vars_ls[name])
 ```
 
 ```{r}
-pmap(list(params$ser, params$ndiff, params$names), 
+pmap(list(params$ser, params$ndiff, params$name), 
      function(first, second, third) {
        ur_adf(first, second, third)
      }) %>% 
@@ -235,21 +235,16 @@ ets_rolling = function(data, params, n_initial, h=1) {
 
 # test
 params = list(model = "MAM", damped = FALSE)
-ets_fcast(ex_hommali, params, h=2, idx_end = 60)
-# ets_rolling(ex_hommali, params, n_initial = 200, h = 1)
-
-# x <- rolling_ets(
-#   ex_hommali, 
-#   params = list(model = "AAA", damped = TRUE) , 
-#   n_initial = 168, h = 2)
+ets_fcast(ex_hommali, params, h=2, idx_end = 168)
+x <- ets_rolling(ex_hommali, params, n_initial = 168, h = 1)
 ```
 
 ```{r}
 eval_model <- function(result) {
   yhat <- result$yhat %>% unlist() %>% exp()
   actual <- result$actual %>% unlist() %>% exp()
-  error <- abs(yhat - actual)
-  error_pct <- error/actual
+#   error <- abs(yhat - actual)
+#   error_pct <- error/actual
   data.frame(
     model_spec = attributes(result)$params %>% paste(collapse = "-"),
     rmse = yardstick::rmse_vec(actual, yhat) %>% round(),
@@ -260,7 +255,7 @@ eval_model <- function(result) {
   )
 }
 
-eval_model(x1)
+eval_model(x) %>% select(-result)
 ```
 
 ```{r}
@@ -299,24 +294,23 @@ params_ets
 
 ```{r}
 res_ets_hommali <- tuning_ets(ex_hommali, params_ets, n_initial = 168)
-res_ets_hommali <- tuning_ets(ex_hommali, params_ets, n_initial = 168)
+res_ets_white <- tuning_ets(ex_white, params_ets, n_initial = 168)
 ```
 
 ```{r}
-res %>% reduce(rbind) %>% select(-result) %>% arrange(rmse)
+saveRDS(res_ets_hommali, "../results/ets_hommali.rds")
+saveRDS(res_ets_white, "../results/ets_white.rds")
+
+res_ets_hommali %>% select(-result) %>% arrange(rmse)
+res_ets_white %>% select(-result) %>% arrange(rmse)
 ```
 
 ## ARIMA
 
 ```{r}
-x <- list(a=2, b=3, c=5)
-x$c <- NULL
-x
-```
-
-```{r}
 arima_fcast <- function(data, params, h=1, idx_end = NULL) {
   idx_end <- if(is.null(idx_end)) length(data) else idx_end
+  method <- paste0(params, collapse = "-")
   params$y <- data %>% subset(end = idx_end)
   
   if(params$auto == TRUE){
@@ -326,20 +320,20 @@ arima_fcast <- function(data, params, h=1, idx_end = NULL) {
     fitted = do.call(forecast::Arima, params) %>% forecast(h=h)
   }
   
-#   return(fitted)
   res <- data.frame(
     index = idx_end, 
-    method = fitted$method,
+    method = method,
     fitted$model$coef %>% t %>% as.data.frame()
   ) %>%
   mutate(
     yhat = list(fitted %>% as.data.frame() %>% `[[`(1)),
-    actual = list(data[(idx_end+1):(idx_end+h)]) 
+    actual = list(data[(idx_end+1):(idx_end+h)]),
+    fitted = list(fitted)
   )
   return(res)
 }
 
-arima_rolling = function(data, params, n_initial = 168, h=1) {
+arima_rolling = function(data, params, n_initial = 168, h = 1) {
   n_sample <- length(data)
   res <- n_initial:n_sample %>% 
     map(arima_fcast, data = data, params = params, h = h) %>% 
@@ -349,19 +343,89 @@ arima_rolling = function(data, params, n_initial = 168, h=1) {
 }
 
 params <- list(order = c(1,0,1), seasonal = c(0,0,1), auto = FALSE)
-# x <- arima_fcast(ex_hommali, params, idx_end = 200)
-x <- arima_rolling(ex_hommali, params)
+x1 <- arima_fcast(ex_hommali, params, idx_end = 168, h = 1)
+x2 <- arima_rolling(ex_hommali, params_arima[1,], n_initial = 168, h = 1)
 ```
 
 ```{r}
-
+list(c(0,0,0)) %>% as.list()
 ```
 
 ```{r}
+17*12
+```
 
+```{r}
+str(params_arima[1,])
+```
+
+```{r}
+# x <- params_arima[1,] %>% as.list()
+x2 <- arima_rolling(ex_hommali, flatten(params_arima[37,]), n_initial = 180, h = 1)
+x2
+```
+
+```{r}
+tuning_arima <- function(data, params, n_initial, h=1) {
+  res <- list()
+  pb <- txtProgressBar(...)
+  for (i in 1:dim(params)[1]) {
+    param <- flatten(params_arima[i,])
+    tryCatch({
+      res[[i]] <- arima_rolling(
+        data, params = param, n_initial = n_initial, h = h
+      ) %>% eval_model()
+    }, error = function(e){})
+    setTxtProgressBar(pb, i)
+  }
+  return(res %>% reduce(rbind))
+}
+```
+
+```{r}
+p <- 0:2
+d <- 0
+q <- 0:2
+D <- 0
+P <- 0:1
+Q <- 0:1
+auto <- FALSE
+
+params1 <- expand_grid(p, d, q, P, D, Q, auto) %>%
+  set_names(c('p', "d", "q", "P", "D", "Q", "auto"))
+
+params_arima <- params1 %>%
+  mutate(order = pmap(list(p, d, q) , ~c(..1, ..2, ..3)),
+         seasonal = pmap(list(P, D, Q) , ~c(..1, ..2, ..3))
+        ) %>%
+  select(order, seasonal, auto)
+
+params_arima[nrow(params1)+1, 3] <- TRUE
+params_arima
+```
+
+```{r}
+res_arima_hommali <- tuning_arima(ex_hommali, params_arima, n_initial = 168)
+res_arima_white   <- tuning_arima(ex_white  , params_arima, n_initial = 168)
+```
+
+```{r}
+saveRDS(res_arima_hommali, "../results/arima_hommali.rds")
+saveRDS(res_arima_white, "../results/arima_white.rds")
+
+res_arima_hommali %>% select(-result) %>% arrange(rmse)
+res_arima_white %>% select(-result) %>% arrange(rmse)
 ```
 
 ## VARS
+
+```{r}
+res_arima_white %>% pull(model_spec)
+```
+
+```{r}
+res_arima_hommali %>% pull(model_spec)
+```
 
 ```{r}
 
