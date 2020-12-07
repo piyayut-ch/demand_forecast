@@ -1,0 +1,368 @@
+# Set up
+
+```{r}
+if (!require("xfun")) install.packages("xfun")
+pkgs <- c(
+  'forecast', 'vars', 'urca', 'MLmetrics', 
+  'lubridate', 'tsbox', 'timetk', 'rlist',
+  'extrafont', 'patchwork', 'hrbrthemes', 'ggthemes', 'ggsci', 'scales', 
+  'tidyverse', 'vroom', 'readxl', 'writexl', 'tsibble'
+)
+xfun::pkg_attach2(pkgs, message = FALSE)
+
+options(
+  repr.plot.width=10, 
+  repr.plot.height=6, 
+  repr.plot.res = 300,
+  repr.matrix.max.rows = 10,
+  repr.matrix.max.cols = Inf
+)
+
+loadfonts(device = "win", quiet = TRUE)
+```
+
+# Load data
+
+```{r}
+# rice 
+rice_m <- read_csv('../data/clean/rice_m.csv')
+
+# rice_price
+price <- read_csv("../data/raw/rice_price.csv")
+
+# exogenious population and gdp of world
+exo <- read_csv("../data/raw/wdi_exo.csv")
+```
+
+```{r}
+# combine
+data <- rice_m %>%
+  left_join(price, by = "date") %>%
+  left_join(exo, by = "date") %>%
+  mutate(
+    gdppc = na.locf(gdppc),
+    pop = na.locf(pop)
+  ) %>% as_tsibble(index = date) %>%
+  filter(year(date) >= 2003 & year(date) < 2020)
+
+data_ts <- data %>% ts_ts()
+data_xts <- data %>% ts_xts()
+```
+
+```{r}
+# log transformation
+ex_hommali <- data_ts[, 'ex_hommali'] %>% log()
+ex_white <- data_ts[, 'ex_white'] %>% log()
+p_w5_th <- data_ts[, 'p_w5_th'] %>% log()
+p_w5_vn <- data_ts[, 'p_w5_vn'] %>% log()
+p_h100_th <- data_ts[, 'p_h100_th'] %>% log()
+gdppc <- data_ts[, 'gdppc'] %>% log()
+pop <- data_ts[, 'pop'] %>% log()
+
+ls_vars = list(
+  ex_hommali = ex_hommali, 
+  ex_white = ex_white, 
+  p_w5_th = p_w5_th, 
+  p_w5_vn = p_w5_vn, 
+  p_h100_th = p_h100_th
+)
+```
+
+# Data Visualization
+
+```{r}
+ggplot(rice_m %>% filter(year_th >= 2546), aes(x=date)) +
+  geom_line( aes(y=ex_hommali/1e6, color = 'ข้าวหอมมะลิ')) +
+  geom_line( aes(y=ex_pathum/1e6, color = 'ข้าวหอมปทุม')) +
+  geom_line( aes(y=ex_white/1e6, color = 'ข้าวเจ้าขาว')) +
+  geom_line( aes(y=ex_glutinous/1e6, color = 'ข้าวเหนียว')) +
+  scale_color_d3() +
+  expand_limits(y = 0) +
+  scale_y_continuous(label = comma) +
+  labs(title = 'ปริมาณส่งออกข้าวสารของไทย',
+       x =  "ปี",
+       y = 'ล้านตันข้าวสาร'
+      ) +
+  theme_ipsum(
+    base_size = 16,
+    base_family = "Athiti Light",
+    axis_title_size = 16
+  ) +
+  theme(
+    legend.position = c(1, 1),
+    legend.direction = 'horizontal',
+    legend.justification = 'right',
+    legend.title = element_blank()
+  ) +
+  scale_x_date(date_breaks = '2 years',
+               labels = function(x) year(x)+543
+               )
+
+# ggsave('../figures/plot_export_m.png', width = 10, height = 7)
+```
+
+# Unit Root Test
+
+```{r}
+# get object name as a string
+get_objname <- function(x) deparse(substitute(x))
+
+# unit root test for a time series
+ur_adf <- function(y, n_diff = 0, varname = NULL, ...) {
+  
+  varname <- if (is.null(varname)) deparse(substitute(y)) else varname
+  y <- if(n_diff == 0) y else diff(y, n_diff)
+  
+  ur.trend <- ur.df(y, type='trend', lags = 10, selectlags = "BIC", ...)
+  ur.drift <- ur.df(y, type='drift', lags = 10, selectlags = "BIC", ...)
+  ur.none  <- ur.df(y, type='none' , lags = 10, selectlags = "BIC", ...)
+
+  tstat.trend <- ur.trend@teststat
+  tstat.drift <- ur.drift@teststat
+  tstat.none  <- ur.none@teststat
+
+  cv.trend <- ur.trend@cval
+  cv.drift <- ur.drift@cval
+  cv.none  <- ur.none@cval
+  
+  lags.trend <- dim(ur.trend@testreg$coefficients)[1] - 3
+  lags.drift <- dim(ur.drift@testreg$coefficients)[1] - 2
+  lags.none  <- dim(ur.none@testreg$coefficients)[1]  - 1
+
+  df_test = rbind(
+    cbind(t(tstat.trend), cv.trend, lags.trend),
+    cbind(t(tstat.drift), cv.drift, lags.drift),
+    cbind(t(tstat.none) , cv.none , lags.none)
+  ) %>% 
+  as.data.frame() %>%
+  rename(c("lag" = "lags.trend")) %>%
+  rownames_to_column("hypo") %>%
+  filter(str_starts(hypo, 'tau')) %>%
+  mutate(
+    result = ifelse(abs(statistic) >= abs(`5pct`), 'Reject', 'Accept'),
+    variable = varname,
+    level = paste0('d', n_diff),
+    star = case_when(
+      abs(statistic) > abs(`1pct`) ~ "***",
+      abs(statistic) > abs(`5pct`) ~ "** ",
+      abs(statistic) > abs(`10pct`) ~ "*  ",
+      TRUE ~ "   "
+    ),
+    hypo = case_when(
+      hypo == "tau3" ~ "trend",
+      hypo == "tau2" ~ "constant",
+      hypo == "tau1" ~ "none"
+    ),
+    statistic = format(round(statistic, 2), nsmall = 2) %>% 
+      as.character %>% str_pad(6, "left")
+  ) %>%
+  select(variable, hypo, level, everything())
+  
+  return(df_test)
+}
+
+# unit root test in a table format
+adf_table <- function(ur_adf) {
+  ur_adf %>% 
+    mutate(
+      stat_star = glue::glue(
+        "{statistic}{star}({lag})"
+      ) %>% as.character()
+    ) %>%
+    pivot_wider(
+      id_cols = c("variable"),
+      names_from = c("level", "hypo"),
+      values_from = c("stat_star")
+    )
+}
+```
+
+```{r}
+varnames = rep(names(ls_vars), 1)
+
+params = expand_grid(varnames, c(0,1)) %>%
+  set_names(c('names', 'ndiff')) %>%
+  mutate(ser = ls_vars[names])
+```
+
+```{r}
+pmap(list(params$ser, params$ndiff, params$names), 
+     function(first, second, third) {
+       ur_adf(first, second, third)
+     }) %>% 
+  reduce(rbind) %>% adf_table() #%>%
+#   write_xlsx('../results/adf_table.xlsx')
+```
+
+# Forecast
+
+Steps:
+1. Split training and test set
+2. Rolling Forecast
+3. Evaluate
+
+
+## ETS
+
+```{r}
+ets_fcast = function(data, params, h=1, idx_end = NULL) {
+  idx_end = if(is.null(idx_end)) length(data) else idx_end
+  params$damped = if(is.na(params$damped)) NULL else params$damped
+  params$y = data %>% subset(end = idx_end)
+  
+  fitted = do.call(forecast::ets, params) %>% forecast(h=h)
+  
+  res <- data.frame(
+    index = idx_end, 
+    method = fitted$model$method,
+    fitted$model$par %>% t %>% as.data.frame()
+  ) %>%
+  mutate(
+    yhat = list(fitted %>% as.data.frame() %>% `[[`(1)),
+    actual = list(data[(idx_end+1):(idx_end+h)]) 
+  )
+  return(res)
+}
+
+ets_rolling = function(data, params, n_initial, h=1) {
+  n_sample <- length(data)
+  res <- n_initial:n_sample %>% 
+    map(ets_fcast, data = data, params = params, h = h) %>% 
+    reduce(rbind)
+  attr(res, "params") <- params
+  return(res)
+}
+
+# test
+params = list(model = "MAM", damped = FALSE)
+ets_fcast(ex_hommali, params, h=2, idx_end = 60)
+# ets_rolling(ex_hommali, params, n_initial = 200, h = 1)
+
+# x <- rolling_ets(
+#   ex_hommali, 
+#   params = list(model = "AAA", damped = TRUE) , 
+#   n_initial = 168, h = 2)
+```
+
+```{r}
+eval_model <- function(result) {
+  yhat <- result$yhat %>% unlist() %>% exp()
+  actual <- result$actual %>% unlist() %>% exp()
+  error <- abs(yhat - actual)
+  error_pct <- error/actual
+  data.frame(
+    model_spec = attributes(result)$params %>% paste(collapse = "-"),
+    rmse = yardstick::rmse_vec(actual, yhat) %>% round(),
+    mape = yardstick::mae_vec(actual, yhat) %>% round(), 
+    mae = yardstick::mape_vec(actual, yhat) %>% round(2)
+  ) %>% mutate(
+    result = list(result)
+  )
+}
+
+eval_model(x1)
+```
+
+```{r}
+tuning_ets <- function(data, params, n_initial, h=1) {
+  res <- list()
+  for (i in 1:dim(params)[1]) {
+    param <- params[i, ] %>% as.list()
+    tryCatch({
+      res[[i]] <- ets_rolling(
+        data, params = param, n_initial = n_initial, h = h
+      ) %>% eval_model()
+    }, error = function(e){})
+  }
+  return(res %>% reduce(rbind))
+}
+```
+
+```{r}
+error_opt <- c("A", "M")
+trend_opt <- c("N", "M", "A")
+seasonal_opt <- c("N", "A", "M")
+
+params1 <- expand_grid(error_opt, trend_opt, seasonal_opt, FALSE) %>%
+  set_names(c('error', "trend", "seasonal", "damped"))
+
+params2 <- expand_grid(error_opt, "A", seasonal_opt, TRUE) %>%
+  set_names(c('error', "trend", "seasonal", "damped"))
+
+params_ets <- bind_rows(params1, params2) %>%
+  mutate(model = paste0(error, trend, seasonal)) %>%
+  select(model, damped)
+
+params_ets[25,] <- list("ZZZ", NA)
+params_ets
+```
+
+```{r}
+res_ets_hommali <- tuning_ets(ex_hommali, params_ets, n_initial = 168)
+res_ets_hommali <- tuning_ets(ex_hommali, params_ets, n_initial = 168)
+```
+
+```{r}
+res %>% reduce(rbind) %>% select(-result) %>% arrange(rmse)
+```
+
+## ARIMA
+
+```{r}
+x <- list(a=2, b=3, c=5)
+x$c <- NULL
+x
+```
+
+```{r}
+arima_fcast <- function(data, params, h=1, idx_end = NULL) {
+  idx_end <- if(is.null(idx_end)) length(data) else idx_end
+  params$y <- data %>% subset(end = idx_end)
+  
+  if(params$auto == TRUE){
+    fitted = auto.arima(params$y) %>% forecast(h=h)
+  } else {
+    params$auto <- NULL
+    fitted = do.call(forecast::Arima, params) %>% forecast(h=h)
+  }
+  
+#   return(fitted)
+  res <- data.frame(
+    index = idx_end, 
+    method = fitted$method,
+    fitted$model$coef %>% t %>% as.data.frame()
+  ) %>%
+  mutate(
+    yhat = list(fitted %>% as.data.frame() %>% `[[`(1)),
+    actual = list(data[(idx_end+1):(idx_end+h)]) 
+  )
+  return(res)
+}
+
+arima_rolling = function(data, params, n_initial = 168, h=1) {
+  n_sample <- length(data)
+  res <- n_initial:n_sample %>% 
+    map(arima_fcast, data = data, params = params, h = h) %>% 
+    reduce(rbind)
+  attr(res, "params") <- params
+  return(res)
+}
+
+params <- list(order = c(1,0,1), seasonal = c(0,0,1), auto = FALSE)
+# x <- arima_fcast(ex_hommali, params, idx_end = 200)
+x <- arima_rolling(ex_hommali, params)
+```
+
+```{r}
+
+```
+
+```{r}
+
+```
+
+## VARS
+
+```{r}
+
+```
