@@ -337,32 +337,20 @@ arima_rolling = function(data, params, n_initial = 168, h = 1) {
   n_sample <- length(data)
   res <- n_initial:n_sample %>% 
     map(arima_fcast, data = data, params = params, h = h) %>% 
-    reduce(rbind)
+    reduce(bind_rows)
   attr(res, "params") <- params
   return(res)
 }
 
-params <- list(order = c(1,0,1), seasonal = c(0,0,1), auto = FALSE)
-x1 <- arima_fcast(ex_hommali, params, idx_end = 168, h = 1)
-x2 <- arima_rolling(ex_hommali, params_arima[1,], n_initial = 168, h = 1)
-```
-
-```{r}
-list(c(0,0,0)) %>% as.list()
-```
-
-```{r}
-17*12
-```
-
-```{r}
-str(params_arima[1,])
+# params <- list(order = c(1,0,1), seasonal = c(0,0,1), auto = FALSE)
+# x1 <- arima_fcast(ex_hommali, params, idx_end = 168, h = 1)
+# x2 <- arima_rolling(ex_hommali, params_arima[1,], n_initial = 168, h = 1)
 ```
 
 ```{r}
 # x <- params_arima[1,] %>% as.list()
-x2 <- arima_rolling(ex_hommali, flatten(params_arima[37,]), n_initial = 180, h = 1)
-x2
+# x2 <- arima_rolling(ex_hommali, flatten(params_arima[37,]), n_initial = 180, h = 1)
+# x2
 ```
 
 ```{r}
@@ -400,6 +388,8 @@ params_arima <- params1 %>%
         ) %>%
   select(order, seasonal, auto)
 
+# params_arima[nrow(params1)+1, 1] <- list(c(0,0,0))
+# params_arima[nrow(params1)+1, 2] <- list(seasonal = c(0,0,0))
 params_arima[nrow(params1)+1, 3] <- TRUE
 params_arima
 ```
