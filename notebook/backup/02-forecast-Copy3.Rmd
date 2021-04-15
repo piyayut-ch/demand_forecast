@@ -1,0 +1,790 @@
+# Set up
+
+```{r}
+if (!require("xfun")) install.packages("xfun")
+pkgs <- c(
+  'forecast', 'vars', 'urca', 'MLmetrics', 'yardstick', 'data.table', 'xts',
+  'lubridate', 'tsbox', 'timetk', 'rlist', 'here', 'ramify',
+  'extrafont', 'patchwork', 'hrbrthemes', 'ggthemes', 'ggsci', 'scales', 
+  'tidyverse', 'vroom', 'readxl', 'writexl', 'tsibble', "tidymodels"
+)
+xfun::pkg_attach2(pkgs, message = FALSE)
+
+loadfonts(device = "win", quiet = TRUE)
+setwd(here())
+```
+
+# Load data
+
+```{r}
+# rice 
+rice_m <- read_csv('data/clean/rice_m.csv')
+
+# rice_price
+price <- read_csv("data/raw/rice_price.csv")
+
+# exogenious population and gdp of world
+exo <- read_csv("data/raw/wdi_exo.csv")
+```
+
+```{r}
+# combine
+data <- rice_m %>%
+  left_join(price, by = "date") %>%
+  left_join(exo, by = "date") %>%
+  mutate(
+    gdppc = na.locf(gdppc),
+    pop = na.locf(pop)
+  ) %>% as_tsibble(index = date) %>%
+  filter(year(date) >= 2003 & year(date) < 2020)
+
+data_ts <- data %>% ts_ts()
+data_xts <- data %>% ts_xts()
+```
+
+```{r}
+# log transformation
+ex_hommali <- data_xts[, 'ex_hommali'] %>% log()
+ex_white <- data_xts[, 'ex_white'] %>% log()
+p_w5_th <- data_xts[, 'p_w5_th'] %>% log()
+p_w5_vn <- data_xts[, 'p_w5_vn'] %>% log()
+p_h100_th <- data_xts[, 'p_h100_th'] %>% log()
+gdppc <- data_xts[, 'gdppc'] %>% log()
+gdppc2 <- gdppc**2
+pop <- data_xts[, 'pop'] %>% log()
+ex_all <- ts_c(ex_hommali, ex_white, p_h100_th, p_w5_th, 
+               p_w5_vn, gdppc, gdppc2, pop)
+
+vars_ls <- list(
+  ex_hommali = ex_hommali, 
+  ex_white = ex_white, 
+  p_w5_th = p_w5_th, 
+  p_w5_vn = p_w5_vn, 
+  p_h100_th = p_h100_th
+)
+
+ex_all %>% head()
+```
+
+```{r}
+# endo <- ts_c(ex_hommali, ex_white, p_h100_th, p_w5_th)
+# exo <- ts_c(p_w5_vn, gdppc, gdppc2)
+# varx_fit <- VAR(endo, p = 1, exogen = exo, season = 12)
+# VARselect(endo, exogen = exo, season = 12)
+# predict(varx_fit, n.ahead = 12, dumvar = exo[1:12,])
+# exo[1:12,]
+```
+
+# Data Visualization
+
+```{r}
+ggplot(rice_m %>% filter(year_th >= 2546), aes(x=date)) +
+  geom_line( aes(y=ex_hommali/1e6, color = 'ข้าวหอมมะลิ')) +
+  geom_line( aes(y=ex_pathum/1e6, color = 'ข้าวหอมปทุม')) +
+  geom_line( aes(y=ex_white/1e6, color = 'ข้าวเจ้าขาว')) +
+  geom_line( aes(y=ex_glutinous/1e6, color = 'ข้าวเหนียว')) +
+  scale_color_d3() +
+  expand_limits(y = 0) +
+  scale_y_continuous(label = comma) +
+  labs(title = 'ปริมาณส่งออกข้าวสารของไทย',
+       x =  "ปี",
+       y = 'ล้านตันข้าวสาร'
+      ) +
+  theme_ipsum(
+    base_size = 16,
+    base_family = "Athiti Light",
+    axis_title_size = 16
+  ) +
+  theme(
+    legend.position = c(1, 1),
+    legend.direction = 'horizontal',
+    legend.justification = 'right',
+    legend.title = element_blank()
+  ) +
+  scale_x_date(date_breaks = '2 years',
+               labels = function(x) year(x)+543
+               )
+
+# ggsave('../figures/plot_export_m.png', width = 10, height = 7)
+```
+
+# Unit Root Test
+
+```{r}
+# get object name as a string
+get_objname <- function(x) deparse(substitute(x))
+
+# unit root test for a time series
+ur_adf <- function(y, n_diff = 0, varname = NULL, ...) {
+  
+  y <- y %>% ts_ts
+  varname <- if (is.null(varname)) deparse(substitute(y)) else varname
+  y <- if(n_diff == 0) y else diff(y, n_diff)
+  
+  ur.trend <- ur.df(y, type='trend', lags = 10, selectlags = "BIC", ...)
+  ur.drift <- ur.df(y, type='drift', lags = 10, selectlags = "BIC", ...)
+  ur.none  <- ur.df(y, type='none' , lags = 10, selectlags = "BIC", ...)
+
+  tstat.trend <- ur.trend@teststat
+  tstat.drift <- ur.drift@teststat
+  tstat.none  <- ur.none@teststat
+
+  cv.trend <- ur.trend@cval
+  cv.drift <- ur.drift@cval
+  cv.none  <- ur.none@cval
+  
+  lags.trend <- dim(ur.trend@testreg$coefficients)[1] - 3
+  lags.drift <- dim(ur.drift@testreg$coefficients)[1] - 2
+  lags.none  <- dim(ur.none@testreg$coefficients)[1]  - 1
+
+  df_test <- rbind(
+    cbind(t(tstat.trend), cv.trend, lags.trend),
+    cbind(t(tstat.drift), cv.drift, lags.drift),
+    cbind(t(tstat.none) , cv.none , lags.none)
+  ) %>% 
+    as.data.frame() %>%
+    rename(c("lag" = "lags.trend")) %>%
+    rownames_to_column("hypo") %>%
+    filter(str_starts(hypo, 'tau')) %>%
+    mutate(
+      result = ifelse(abs(statistic) >= abs(`5pct`), 'Reject', 'Accept'),
+      variable = varname,
+      level = paste0('d', n_diff),
+      star = case_when(
+        abs(statistic) > abs(`1pct`) ~ "***",
+        abs(statistic) > abs(`5pct`) ~ "** ",
+        abs(statistic) > abs(`10pct`) ~ "*  ",
+        TRUE ~ "   "
+      ),
+      hypo = case_when(
+        hypo == "tau3" ~ "trend",
+        hypo == "tau2" ~ "constant",
+        hypo == "tau1" ~ "none"
+      ),
+      statistic = format(round(statistic, 2), nsmall = 2) %>% 
+        as.character %>% str_pad(6, "left")
+    ) %>%
+    select(variable, hypo, level, everything())
+  
+  return(df_test)
+}
+
+# unit root test in a table format
+adf_table <- function(ur_adf) {
+  ur_adf %>% 
+    mutate(
+      stat_star = glue::glue(
+        "{statistic}{star}({lag})"
+      ) %>% as.character()
+    ) %>%
+    pivot_wider(
+      id_cols = c("variable"),
+      names_from = c("level", "hypo"),
+      values_from = c("stat_star")
+    )
+}
+```
+
+```{r}
+vars_nam <- rep(names(vars_ls), 1)
+
+params <- expand_grid(vars_nam, c(0,1)) %>%
+  set_names(c('name', 'ndiff')) %>%
+  mutate(ser = vars_ls[name])
+
+pmap(list(params$ser, params$ndiff, params$name), 
+     function(first, second, third) {
+       ur_adf(first, second, third)
+     }) %>% 
+  reduce(rbind) %>% adf_table() #%>%
+```
+
+# Forecast
+
+Steps:
+1. Split training and test set
+2. Rolling Forecast
+3. Evaluate
+
+
+- tsf_ets
+- tsf_arima
+- tsf_var
+- tsf_rolling_fcast
+- tsf_eval_model
+- 
+
+
+# Define functions
+
+
+## Timeseries Cross-Validate
+
+```{r}
+tsf_tscv <- function(data, 
+                     initial, 
+                     assess = 1, 
+                     skip = 0, 
+                     cumulative = TRUE,
+                     endo_vars = NULL,
+                     exo_vars = NULL) {
+  
+  # get number of observations
+  n_obs <- length(tk_index(data))
+  
+  # calculate number of cv round based on cv parameters
+  n_round <- floor(1 + (n_obs - initial - assess) / (skip + 1))
+  
+  # helper function to subset xts
+  subet_xts <- function(data, idx_start, idx_end) {
+    data[idx_start:idx_end, ]
+  }
+  
+  # initiate cv data frame
+  res <- data.frame()
+  idx_start <- 1
+  idx_end <- initial
+  for (i in 1:n_round) {
+    res[i, 'id'] <- i
+    res[i, 'idx_start'] <- idx_start 
+    res[i, 'idx_end'] <- idx_end
+    idx_start <- ifelse(cumulative == TRUE, 1, idx_start + 1 + skip) 
+    idx_end <- idx_end + 1 + skip
+    }
+  # add analysis for model fit and assess for model evaluation
+  res %>% 
+    mutate(
+      analysis = pmap(list(idx_start,idx_end), 
+                      subet_xts, 
+                      data = data[, c(endo_vars, exo_vars)]),
+      assess   = pmap(list(idx_end+1, idx_end+assess), 
+                      subet_xts, 
+                      data = data[, endo_vars])
+    )
+}
+```
+
+```{r}
+# test
+cv_test <- tsf_tscv(ex_all, 
+                    initial = 14*12, 
+                    assess = 2, 
+                    skip = 0, 
+                    cumulative = TRUE,
+                    endo_vars = c('ex_hommali', 'ex_white'),
+                    exo_vars = NULL
+                   )
+
+cv_test[1, ]
+cv_test[[1, 'analysis']] %>% tail
+cv_test[[1, 'assess']] %>% head
+```
+
+## Rolling Forecast
+
+```{r}
+
+```
+
+## Model Evaluation
+
+```{r}
+tsf_eval_mod <- function(result, transform = "log") {
+  
+  if (transform == "log") {
+    inverse_trans <- function(x) exp(x)
+  }
+  else {
+    inverse_trans <- function(x) x
+  }
+  
+  n_round <- nrow(result)
+  var_names <- names(result$assess[[1]])
+  var_names <- var_names %>% set_names(var_names)
+  
+  extract_xts <- function(x, 
+                          type = c("assess", "pred"),
+                          var_name = NULL
+                         ) {
+    map(x[[type]], 
+        function(y) y[, var_name] %>% inverse_trans
+        ) %>% reduce(rbind) %>% as.numeric
+  }
+  assess <- map(var_names, extract_xts, type = "assess", x = result)
+  pred   <- map(var_names, extract_xts, type = "pred"  , x = result)
+  
+  rmse <- map(var_names, ~ yardstick::rmse_vec(assess[[.x]], pred[[.x]]))
+  mae  <- map(var_names, ~ yardstick::mae_vec(assess[[.x]], pred[[.x]]))
+  mape <- map(var_names, ~ yardstick::mape_vec(assess[[.x]], pred[[.x]]))
+  
+  res <- expand.grid(
+    variable = var_names,
+    model = result$model[[1]],
+    param = result$param[[1]] %>% paste(collapse = "-"),
+    stringsAsFactors = FALSE
+  ) %>%
+  mutate(
+    rmse = map(variable, ~rmse[.x]) %>% unlist,
+    mae  = map(variable, ~mae[.x] ) %>% unlist,
+    mape = map(variable, ~mape[.x]) %>% unlist,
+    assess = list(result$assess),
+    pred = list(result$pred),
+  )
+  return(res)
+}
+```
+
+```{r}
+# test
+set.seed(122)
+cv_test <- tsf_tscv(ex_all, 
+                    initial = 14*12, 
+                    assess = 2, 
+                    skip = 0, 
+                    cumulative = TRUE,
+                    endo_vars = c('ex_hommali'),
+                    exo_vars = NULL
+                   )
+
+cv_test[1, ]
+cv_test[[1, 'analysis']] %>% tail
+cv_test[[1, 'assess']] %>% head
+        
+cv_test1 <- cv_test %>% mutate(
+  pred = map(assess, ~.x + rnorm(2)),
+  model = "ets"
+)
+
+tsf_eval_mod(cv_test1)
+```
+
+## Hyperparameter Tuning
+
+```{r}
+tsf_tune_grid <- function(cv, method, params_grid) {
+  res <- list()
+  n_params <- nrow(params_grid)
+  pb <- txtProgressBar(0, n_params, style = 3)
+  for (i in 1:n_params) {
+    param <- params_grid[i,]
+    tryCatch({
+      res[[i]] <- method(cv, param) %>% tsf_eval_mod()
+    }, error = function(e){})
+    setTxtProgressBar(pb, i)
+  }
+  return(res %>% reduce(bind_rows))
+}
+```
+
+## ETS
+
+```{r}
+tsf_ets <- function(cv, param) {
+  
+  param <- param %>% as.list
+  n_ahead <- cv[[1, 'assess']] %>% tk_index %>% length
+  var_name <- cv[[1, 'assess']] %>% names
+  
+  # define a fit function
+  fit_mod <- function(y, param) {
+    do.call(forecast::ets, 
+            list.append(y = y %>% ts_ts, param))
+  }
+
+  fcast <- function(fitted, n_ahead, var_name) {
+    x <- fitted %>% forecast(n_ahead) %>% '[['('mean') %>% as.xts
+    names(x) <- var_name
+    index(x) <- fitted$x %>% ts_xts %>% tk_index %>% 
+      tk_make_future_timeseries(length_out = n_ahead)
+    return(x)
+  }
+  
+  res <- cv %>% # make a copy
+    mutate(
+      fitted = map(analysis, fit_mod, param),
+      pred = map(fitted, fcast, n_ahead, var_name),
+      coef = map(fitted, function(x) x[['par']]),
+      param = list(param),
+      model = "ets"
+      ) %>% 
+    select(-analysis, -fitted)
+  
+  return(res)
+}
+```
+
+```{r}
+# testing
+cv_test <- tsf_tscv(data_xts %>% log, 
+                    initial = 14*12, 
+                    assess = 12, 
+                    skip = 0, 
+                    cumulative = TRUE,
+                    endo_vars = c('ex_hommali'),
+                    exo_vars = NULL
+                   )
+
+params_ets_test <- tibble(
+  model = c("MNN", "MAA"),
+  damped = c(FALSE, TRUE)
+)
+
+params_ets_test
+tsf_ets(cv_test[1:2,], params_ets_test[1,])
+tsf_ets(cv_test[1:2,], params_ets_test[1,]) %>% tsf_eval_mod()
+tsf_tune_grid(cv_test[1:2,], tsf_ets, params_ets_test)
+```
+
+## ARIMA
+
+```{r}
+tsf_arima <- function(cv, param) {
+  
+  n_ahead <- cv[[1, 'assess']] %>% tk_index %>% length
+  var_name <- cv[[1, 'assess']] %>% names
+
+  param <- param %>% as.list
+  param$order <- param$order %>% unlist
+  param$seasonal <- param$seasonal %>% unlist
+  
+  # define a fit function
+  fit_mod <- function(y, param) {
+    if (param$auto == TRUE) {
+      forecast::auto.arima(y %>% ts_ts) 
+    } else {
+      param$auto <- NULL
+      do.call(forecast::Arima, 
+              list.append(y = y %>% ts_ts, param))
+    }
+  }
+  
+  fcast <- function(fitted, n_ahead, var_name) {
+    x <- fitted %>% forecast(n_ahead) %>% '[['('mean') %>% as.xts
+    names(x) <- var_name
+    index(x) <- fitted$x %>% ts_xts %>% tk_index %>% 
+      tk_make_future_timeseries(length_out = n_ahead)
+    return(x)
+  }
+  
+  res <- cv %>% # make a copy
+    mutate(
+      fitted = map(analysis, fit_mod, param),
+      pred = map(fitted, fcast, n_ahead, var_name),
+      coef = map(fitted, function(x) x[['par']]),
+      param = list(param),
+      model = "arima"
+      ) %>% 
+    select(-analysis, -fitted)
+  
+  return(res)
+}
+```
+
+```{r}
+# test
+cv_test <- tsf_tscv(data_xts %>% log, 
+                    initial = 14*12, 
+                    assess = 12, 
+                    skip = 0, 
+                    cumulative = TRUE,
+                    endo_vars = c('ex_hommali'),
+                    exo_vars = NULL
+                   )
+
+params_arima_test <- tibble(
+  order = list(c(1,0,0), NA),
+  seasonal = list(c(1,0,0), NA),
+  auto = c(FALSE, TRUE)
+)
+params_arima_test
+
+tsf_arima(cv_test[1:2,], params_arima_test[1,])
+tsf_arima(cv_test[1:2,], params_arima_test[1,]) %>% tsf_eval_mod()
+tsf_tune_grid(cv_test[1:2,], tsf_arima, params_arima_test)
+```
+
+## VAR
+
+```{r}
+tsf_var <- function(cv, param) {
+  param <- param %>% as.list
+  param$endo_vars <- param$endo_vars %>% unlist
+  param$exo_vars <- param$exo_vars %>% unlist
+  
+  if (is.na(param$season)) {
+    param$season <- NULL
+  }
+  param$lag.max <- 12
+  
+  n_ahead <-length(tk_index(cv$assess[[1]]))
+  
+  gen_future_timeindex <- function(x, n_ahead = 1) {
+    x %>% tk_index %>% tk_make_future_timeseries(length_out = n_ahead)
+  }
+
+  gen_future_exo <- function(x, exo_vars, n_ahead = 1) {
+    exo <- x$datamat[, exo_vars] %>% 
+      rownames_to_column(var = "time") %>% 
+      mutate(time = as.Date(time)) %>% 
+      ts_long() %>% ts_xts
+
+    tibble(
+      time = gen_future_timeindex(exo, n_ahead),
+      x$datamat[x$obs, exo_vars]
+    ) %>% ts_long %>% ts_xts
+  }
+
+  fit_mod <- function(y, param) {
+    n_obs <- y %>% tk_index() %>% length()
+    endo <- y[, param$endo_vars]
+    exo  <- y[, param$exo_vars]
+    param$endo_vars <- NULL
+    param$exo_vars <- NULL
+
+    do.call(vars::VAR, 
+            list.append(y = endo, exogen = exo, param))
+  }
+  
+  fcast <- function(fitted, n_ahead) {
+    var_names <- fitted$y %>% colnames
+    exo_future <- gen_future_exo(fitted, param$exo_vars, n_ahead)
+
+    pred <- predict(fitted, n.ahead = n_ahead, dumvar = exo_future)
+
+    pred <- var_names %>% 
+      map(function(x) pred[['fcst']][[x]][, 'fcst']) %>% 
+      set_names(var_names)
+
+    data.frame(
+      time = tk_index(exo_future),
+      pred
+    ) %>% ts_long %>% ts_xts
+  }
+  
+#   fitted <- fit_mod(cv[[1, 'analysis']], param)
+#   fcast(fitted, n_ahead)
+  res <- cv %>% # make a copy
+    mutate(
+      fitted = map(analysis, fit_mod, param),
+      pred = map(fitted, fcast, n_ahead),
+      param = list(param),
+      model = "var"
+      ) %>% 
+    select(-analysis, -fitted)
+  
+  return(res)
+}
+```
+
+```{r}
+params_var_test[1,] %>% as.list
+```
+
+```{r}
+fit_mod <- function(y, param) {
+  param <- param %>% as.list
+  param$endo_vars <- param$endo_vars %>% unlist
+  param$exo_vars <- param$exo_vars %>% unlist
+  
+  n_obs <- y %>% tk_index() %>% length()
+  endo <- y[, param$endo_vars]
+  exo  <- y[, param$exo_vars]
+  param$endo_vars <- NULL
+  param$exo_vars <- NULL
+
+  do.call(vars::VAR, 
+          list.append(y = endo, exogen = exo, param))
+}
+
+fitted <- fit_mod(cv_test[[1, 'analysis']], params_var_test[1,])
+# fcast(fitted, n_ahead)
+```
+
+```{r}
+initial <- 12*14
+assess <- 12
+skip <- 0
+endo_vars <- c("ex_hommali", "ex_white", "p_h100_th", "p_w5_th")
+exo_vars  <- c("p_w5_vn", "gdppc", "gdppc2", "pop")
+
+cv_test <- tsf_tscv(ex_all,
+                    initial = initial, 
+                    assess = assess, 
+                    skip = skip, 
+                    cumulative = TRUE,
+                    endo_vars = endo_vars,
+                    exo_vars = exo_vars)
+
+params_var_test <- tibble(
+  type = c("const", "trend"),
+  season = c(12, NA),
+  endo_vars = list(c("ex_hommali", "ex_white", "p_h100_th", "p_w5_th"),
+                   c("ex_hommali", "ex_white", "p_h100_th", "p_w5_th")),
+  exo_vars  = list(c("p_w5_vn", "gdppc"),
+                   c("p_w5_vn", "gdppc", "gdppc2"))
+)
+
+params_var_test
+tsf_var(cv_test[1:2,], params_var_test[1,])
+tsf_var(cv_test[1:2,], params_var_test[1,]) %>% tsf_eval_mod()
+tsf_tune_grid(cv_test[1:2,], tsf_var, params_var_test)
+```
+
+# Forecast
+
+
+## Create TSCV
+
+```{r}
+initial <- 12*14
+assess <- 1
+skip <- 0
+endo_vars <- c("ex_hommali", "ex_white", "p_h100_th", "p_w5_th")
+exo_vars <- c("p_w5_vn", "gdppc", "gdppc2", "pop")
+
+cv_ex_hommali <- tsf_tscv(ex_all,
+                          initial = initial, 
+                          assess = assess, 
+                          skip = skip, 
+                          cumulative = TRUE,
+                          endo_vars = "ex_hommali",
+                          exo_vars = NULL)
+
+cv_ex_white   <- tsf_tscv(ex_all,
+                          initial = initial, 
+                          assess = assess, 
+                          skip = skip, 
+                          cumulative = TRUE,
+                          endo_vars = "ex_white",
+                          exo_vars = NULL)
+
+cv_ex_all     <- tsf_tscv(ex_all,
+                          initial = initial, 
+                          assess = assess, 
+                          skip = skip, 
+                          cumulative = TRUE,
+                          endo_vars = endo_vars,
+                          exo_vars = exo_vars)
+
+# cv_ex_all[[1, 'analysis']]
+```
+
+## ETS
+
+```{r}
+error_opt <- c("A", "M")
+trend_opt <- c("N", "M", "A")
+seasonal_opt <- c("N", "A", "M")
+
+params1 <- expand_grid(error_opt, trend_opt, seasonal_opt, FALSE) %>%
+  set_names(c('error', "trend", "seasonal", "damped"))
+
+params2 <- expand_grid(error_opt, "A", seasonal_opt, TRUE) %>%
+  set_names(c('error', "trend", "seasonal", "damped"))
+
+params_ets <- bind_rows(params1, params2) %>%
+  mutate(model = paste0(error, trend, seasonal)) %>%
+  select(model, damped)
+
+params_ets[25,] <- list("ZZZ", NA)
+params_ets
+```
+
+```{r}
+tune_ets_hommali <- tsf_tune_grid(cv_ex_hommali, tsf_ets, params_ets)
+tune_ets_white   <- tsf_tune_grid(cv_ex_white  , tsf_ets, params_ets)
+```
+
+```{r}
+saveRDS(tune_ets_hommali, "results/tune_ets_hommali.rds")
+saveRDS(tune_ets_white  , "results/tune_ets_white.rds")
+
+tune_ets_hommali <- readRDS("results/tune_ets_hommali.rds")
+tune_ets_white   <- readRDS("results/tune_ets_white.rds")
+```
+
+```{r}
+tune_ets_hommali %>% arrange(rmse)
+tune_ets_white   %>% arrange(rmse)
+```
+
+## ARIMA
+
+```{r}
+p <- 0:2
+d <- 0
+q <- 0:2
+D <- 0
+P <- 0:1
+Q <- 0:1
+auto <- FALSE
+
+params1 <- expand_grid(p, d, q, P, D, Q, auto) %>%
+  set_names(c('p', "d", "q", "P", "D", "Q", "auto"))
+
+params_arima <- params1 %>%
+  mutate(
+    order = pmap(list(p, d, q) , ~c(..1, ..2, ..3)),
+    seasonal = pmap(list(P, D, Q) , ~c(..1, ..2, ..3))
+    ) %>%
+  select(order, seasonal, auto)
+
+params_arima[nrow(params1)+1, 3] <- TRUE
+params_arima
+```
+
+```{r}
+tune_arima_hommali <- tsf_tune_grid(cv_ex_hommali, tsf_arima, params_arima)
+tune_arima_white   <- tsf_tune_grid(cv_ex_white,   tsf_arima, params_arima)
+```
+
+```{r}
+saveRDS(tune_arima_hommali, "results/tune_arima_hommali.rds")
+saveRDS(tune_arima_white  , "results/tune_arima_white.rds")
+
+tune_arima_hommali <- readRDS("results/tune_arima_hommali.rds")
+tune_arima_white   <- readRDS("results/tune_arima_white.rds")
+```
+
+```{r}
+tune_arima_hommali %>% arrange(rmse)
+tune_arima_white   %>% arrange(rmse)
+```
+
+## VAR
+
+```{r}
+type_opt   <- c("const", "trend", "both")
+season_opt <- c(NA, 12)
+endo_opt   <- list(c("ex_hommali", "ex_white", "p_h100_th", "p_w5_th"))
+exo_opt    <- list(NULL,
+                   c("p_w5_vn", "gdppc"),
+                   c("p_w5_vn", "gdppc", "gdppc2"),
+                   c("p_w5_vn", "gdppc", "gdppc2", "pop")
+                  )
+
+params_var <- expand_grid(type_opt, season_opt, endo_opt, exo_opt) %>%
+  set_names(c("type", "season", "endo_vars", "exo_vars"))
+params_var
+```
+
+```{r}
+tune_var <- tsf_tune_grid(cv_ex_all, tsf_var, params_var)
+```
+
+```{r}
+saveRDS(tune_var, "results/tune_var.rds")
+tune_var <- readRDS("results/tune_var.rds")
+```
+
+```{r}
+tune_var %>% 
+  filter(variable %in% c("ex_white")) %>% 
+  group_by(variable) %>% 
+  arrange(rmse)
+
+tune_var %>% 
+  filter(variable %in% c("ex_hommali")) %>% 
+  group_by(variable) %>% 
+  arrange(rmse)
+```

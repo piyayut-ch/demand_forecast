@@ -1,3 +1,145 @@
 ```{r}
+options(
+  repr.plot.width=10, 
+  repr.plot.height=6, 
+  repr.plot.res = 300,
+  repr.matrix.max.rows = 10,
+  repr.matrix.max.cols = Inf
+)
+```
 
+```{r}
+if (!require("xfun")) install.packages("xfun")
+pkgs = c(
+  'lubridate',
+  'tsbox',
+  'timetk',
+  'tsibble',
+  'hrbrthemes',
+  'ggthemes',
+  'ggsci',
+  'scales', 
+  'tidyverse', 
+  'readxl', 
+  'writexl', 
+  'here', 
+  'vroom'
+)
+
+xfun::pkg_attach2(pkgs, message = FALSE)
+
+setwd(here())
+```
+
+# Steps: cleaning data
+- นำเข้าข้อมูลจาก excel
+- แปลงข้อมูลให้อยู่ในรูปแบบ wide และ long เก็บเป็น data.frame
+- แปลงข้อมูลให้เป็นรายปีและรายเดือน
+- คำนวณการบริโภคในประเทศ โดยใช้สูตร domestic consumption = production - export
+
+
+# Production data
+
+```{r}
+production <- read_excel('data/raw/rice_production.xlsx', 'all')
+```
+
+```{r}
+production_y <- production %>% 
+  # summarize over major and minor rice
+  group_by(year, rice_type) %>%
+  summarize(
+    area_plant = sum(area_plant),
+    area_harvest = sum(area_harvest),
+    production = sum(production)*0.66 # convert to milled rice
+  ) %>%
+  mutate(
+    yield_plant = production*1000/area_plant,
+    yield_harvest = production*1000/area_harvest
+  ) %>% ungroup()
+```
+
+```{r}
+production_y_wide <- production_y %>%
+  pivot_wider(
+    id_cols = year,
+    names_from = rice_type,
+    values_from = production
+  )
+
+names(production_y_wide) <- c(
+  'year_th', 'q_pat', 'q_hml', 'q_wht', 'q_glu'
+)
+```
+
+```{r}
+production_y_wide %>% tail()
+```
+
+# Export data
+
+```{r}
+# Read and join meta data
+export <- read_rds('data/raw/export_1006_master.rds')
+export_ref <- read_excel('data/ref/ref_hs1006_th.xlsx')
+
+export_joined <- export %>% 
+  left_join(export_ref, by = c('hscode' = 'hscode'))
+```
+
+##  Yearly
+
+```{r}
+# Yearly data
+export_y <- export_joined %>% 
+  group_by(year_th, varities) %>%
+  summarize(vol = sum(vol)) %>% ungroup()
+
+export_y_wide <- export_y %>%
+  pivot_wider(
+    id_cols = year_th,
+    names_from = varities,
+    values_from = vol
+  ) %>%
+  select(
+    year_th,
+    "ex_glu" = glutinous,
+    "ex_wht" = white,
+    "ex_hml" = hommali,
+    "ex_pat" = fragrant,
+    "ex_col" = colored
+  )
+```
+
+```{r}
+export_y_wide <- export_y %>%
+  pivot_wider(
+    id_cols = year_th,
+    names_from = varities,
+    values_from = vol
+  )
+```
+
+## Monthly
+
+```{r}
+# Monthly data
+export_m <- export_joined %>% 
+  group_by(year_th, month, varities) %>%
+  summarize(vol = sum(vol)) %>% ungroup()
+
+export_wide_m <- export_m %>%
+  pivot_wider(
+    c(year_th, month),
+    varities,
+    values_from = vol,
+    values_fill = 0
+  ) %>% filter(year_th >= 2545)
+
+names(export_wide_m) <- c(
+  'year_th', 'month',
+  'ex_glutinous','ex_white','ex_hommali','ex_pathum','ex_colored'
+)
+
+head(export_wide_m)
 ```
